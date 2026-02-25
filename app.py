@@ -21,14 +21,13 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- FUNCIÓN DE LIMPIEZA MAESTRA ---
+# --- FUNCIONES DE LIMPIEZA ---
 def limpiar_numeros(valor):
     if isinstance(valor, str): valor = valor.replace('$', '').replace(',', '').strip()
     try: return float(valor)
     except: return 0.0
 
 def procesar_archivos(file_articulos, file_concepto, nombre_sucursal):
-    """Esta es la 'máquina' que limpia los Excel de cualquier sucursal que le pasemos"""
     df_art = pd.read_csv(file_articulos) if file_articulos.name.endswith('.csv') else pd.read_excel(file_articulos)
     df_mes = pd.read_csv(file_concepto) if file_concepto.name.endswith('.csv') else pd.read_excel(file_concepto)
 
@@ -40,8 +39,11 @@ def procesar_archivos(file_articulos, file_concepto, nombre_sucursal):
     if 'rubro' not in df_art.columns: df_art['rubro'] = 'S/D'
 
     if 'fecha' in df_mes.columns: df_mes.rename(columns={'fecha': 'mes'}, inplace=True)
-    if 'salón' in df_mes.columns: df_mes.rename(columns={'salón': 'salon'}, inplace=True)
     if 'ventas' in df_mes.columns and 'tickets' not in df_mes.columns: df_mes.rename(columns={'ventas': 'tickets'}, inplace=True)
+
+    if 'salon' not in df_mes.columns: df_mes['salon'] = 0.0
+    if 'mostrador' not in df_mes.columns: df_mes['mostrador'] = 0.0
+    if 'tickets' not in df_mes.columns: df_mes['tickets'] = 1.0
 
     diccionario_rubros = {
         "1": "Cafetería", "2": "Entradas", "3": "Postres", "4": "Tapas", "5": "Platos Principales", "6": "Sándwiches", 
@@ -57,13 +59,43 @@ def procesar_archivos(file_articulos, file_concepto, nombre_sucursal):
     df_art['ventas'] = df_art['ventas'].apply(limpiar_numeros)
     df_mes['salon'] = df_mes['salon'].apply(limpiar_numeros)
     df_mes['mostrador'] = df_mes['mostrador'].apply(limpiar_numeros)
-    if 'tickets' in df_mes.columns: df_mes['tickets'] = df_mes['tickets'].apply(limpiar_numeros)
-    else: df_mes['tickets'] = 1 
+    df_mes['tickets'] = df_mes['tickets'].apply(limpiar_numeros)
 
     df_art['sucursal'] = nombre_sucursal
     df_mes['sucursal'] = nombre_sucursal
     
     return df_art, df_mes
+
+def procesar_cobros(file_cobros, nombre_sucursal):
+    """Lector especializado para el formato horizontal de MaxiRest"""
+    df_cob = pd.read_csv(file_cobros) if file_cobros.name.endswith('.csv') else pd.read_excel(file_cobros)
+    df_cob.columns = df_cob.columns.astype(str).str.strip().str.lower().str.replace('ó', 'o').str.replace('í', 'i')
+    
+    # Lista de medios de pago que MaxiRest pone como columnas
+    medios_esperados = ['efectivo', 'cta_cte', 'tarjetas', 'tickets', 'cheques', 'otros', 'mercado_pago', 'mercadopago', 'qr', 'transferencia']
+    
+    # Nos quedamos solo con las columnas que existen en el archivo
+    columnas_pago = [c for c in medios_esperados if c in df_cob.columns]
+    
+    if columnas_pago:
+        # Convertimos todo a números por las dudas
+        for col in columnas_pago:
+            df_cob[col] = df_cob[col].apply(limpiar_numeros)
+            
+        # Sumamos toda la columna y transformamos el formato horizontal a vertical
+        totales = df_cob[columnas_pago].sum().reset_index()
+        totales.columns = ['medio_pago', 'monto']
+        
+        # Filtramos los métodos que no tuvieron ventas ($0)
+        totales = totales[totales['monto'] > 0].copy()
+        
+        # Emprolijamos los nombres (ej: "cta_cte" a "Cta Cte")
+        totales['medio_pago'] = totales['medio_pago'].str.replace('_', ' ').str.title()
+        totales['sucursal'] = nombre_sucursal
+        
+        return totales[['sucursal', 'medio_pago', 'monto']]
+    else:
+        return pd.DataFrame()
 
 # --- BARRA LATERAL MULTI-SUCURSAL ---
 with st.sidebar:
@@ -72,54 +104,65 @@ with st.sidebar:
     
     st.markdown("---")
     st.markdown("### 🏪 Local 1")
-    file_art_1 = st.file_uploader("Artículos (Local 1)", type=["csv", "xlsx", "xls"], key="a1")
-    file_mes_1 = st.file_uploader("Mensuales (Local 1)", type=["csv", "xlsx", "xls"], key="m1")
+    file_art_1 = st.file_uploader("1. Artículos", type=["csv", "xlsx", "xls"], key="a1")
+    file_mes_1 = st.file_uploader("2. Mensuales", type=["csv", "xlsx", "xls"], key="m1")
+    file_cob_1 = st.file_uploader("3. Cobros (Opcional)", type=["csv", "xlsx", "xls"], key="c1")
 
     st.markdown("---")
     st.markdown("### 🏪 Local 2")
-    file_art_2 = st.file_uploader("Artículos (Local 2)", type=["csv", "xlsx", "xls"], key="a2")
-    file_mes_2 = st.file_uploader("Mensuales (Local 2)", type=["csv", "xlsx", "xls"], key="m2")
+    file_art_2 = st.file_uploader("1. Artículos", type=["csv", "xlsx", "xls"], key="a2")
+    file_mes_2 = st.file_uploader("2. Mensuales", type=["csv", "xlsx", "xls"], key="m2")
+    file_cob_2 = st.file_uploader("3. Cobros (Opcional)", type=["csv", "xlsx", "xls"], key="c2")
 
 # --- LÓGICA DE FUSIÓN Y FILTRADO ---
 dfs_art = []
 dfs_mes = []
+dfs_cob = []
 
 try:
-    # Leemos lo que se haya subido
     if file_art_1 and file_mes_1:
         a1, m1 = procesar_archivos(file_art_1, file_mes_1, "Local 1")
         dfs_art.append(a1)
         dfs_mes.append(m1)
+    if file_cob_1:
+        c1 = procesar_cobros(file_cob_1, "Local 1")
+        if not c1.empty: dfs_cob.append(c1)
 
     if file_art_2 and file_mes_2:
         a2, m2 = procesar_archivos(file_art_2, file_mes_2, "Local 2")
         dfs_art.append(a2)
         dfs_mes.append(m2)
+    if file_cob_2:
+        c2 = procesar_cobros(file_cob_2, "Local 2")
+        if not c2.empty: dfs_cob.append(c2)
 
-    # Si hay al menos un local cargado, empezamos a armar el tablero
     if dfs_art and dfs_mes:
-        # Juntamos todo en un "Mega Excel" invisible
         df_art_master = pd.concat(dfs_art, ignore_index=True)
         df_mes_master = pd.concat(dfs_mes, ignore_index=True)
+        df_cob_master = pd.concat(dfs_cob, ignore_index=True) if dfs_cob else pd.DataFrame()
 
-        # Filtramos según lo que eligió el usuario en el botón de opciones
         if vista_seleccionada == "Local 1" and file_art_1:
             df_art = df_art_master[df_art_master['sucursal'] == "Local 1"].copy()
             df_mes = df_mes_master[df_mes_master['sucursal'] == "Local 1"].copy()
+            df_cob = df_cob_master[df_cob_master['sucursal'] == "Local 1"].copy() if not df_cob_master.empty else pd.DataFrame()
             titulo_sucursal = "Local 1"
         
         elif vista_seleccionada == "Local 2" and file_art_2:
             df_art = df_art_master[df_art_master['sucursal'] == "Local 2"].copy()
             df_mes = df_mes_master[df_mes_master['sucursal'] == "Local 2"].copy()
+            df_cob = df_cob_master[df_cob_master['sucursal'] == "Local 2"].copy() if not df_cob_master.empty else pd.DataFrame()
             titulo_sucursal = "Local 2"
         
         elif vista_seleccionada == "Consolidado (Ambas)" and len(dfs_art) == 2:
-            # Agrupamos y sumamos matemáticamente ambas sucursales
             df_art = df_art_master.groupby(['producto', 'rubro'], as_index=False)[['unidades', 'ventas']].sum()
             df_mes = df_mes_master.groupby('mes', as_index=False)[['salon', 'mostrador', 'tickets']].sum()
+            if not df_cob_master.empty:
+                df_cob = df_cob_master.groupby('medio_pago', as_index=False)['monto'].sum()
+            else:
+                df_cob = pd.DataFrame()
             titulo_sucursal = "Consolidado Global"
         else:
-            st.warning("⚠️ Faltan cargar archivos para mostrar la vista seleccionada. Asegúrese de subir los Excel necesarios para esta vista.")
+            st.warning("⚠️ Faltan cargar archivos para mostrar la vista seleccionada. Asegúrese de subir los Excel necesarios.")
             st.stop()
 
         # PREPARACIÓN FINAL DE DATOS
@@ -138,14 +181,33 @@ try:
         
         kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns([1.2, 1.2, 1.2, 0.9, 0.9])
         kpi1.metric("Facturación Bruta", f"${facturacion_total:,.0f}")
-        kpi2.metric("Venta Mostrador", f"${total_mostrador:,.0f}", f"{(total_mostrador/facturacion_total)*100:.1f}% del total", delta_color="off")
-        kpi3.metric("Venta Salón", f"${total_salon:,.0f}", f"{(total_salon/facturacion_total)*100:.1f}% del total", delta_color="off")
+        kpi2.metric("Venta Mostrador", f"${total_mostrador:,.0f}", f"{(total_mostrador/facturacion_total)*100:.1f}% del total" if facturacion_total > 0 else "0%", delta_color="off")
+        kpi3.metric("Venta Salón", f"${total_salon:,.0f}", f"{(total_salon/facturacion_total)*100:.1f}% del total" if facturacion_total > 0 else "0%", delta_color="off")
         
         ticket_prom = (facturacion_total/tickets_totales) if tickets_totales > 0 else 0
         upt = (unidades_totales/tickets_totales) if tickets_totales > 0 else 0
         kpi4.metric("Ticket Promedio", f"${ticket_prom:,.0f}", f"{tickets_totales:,.0f} Tks", delta_color="off")
         kpi5.metric("Venta Cruzada (UPT)", f"{upt:.2f}", "Art./Ticket", delta_color="off")
 
+        # --- SECCIÓN NUEVA: MEDIOS DE PAGO ---
+        if not df_cob.empty:
+            st.markdown("<div class='pbi-title'>💳 Análisis de Medios de Pago</div>", unsafe_allow_html=True)
+            
+            df_cob_agrupado = df_cob.groupby('medio_pago', as_index=False)['monto'].sum().sort_values(by='monto', ascending=False)
+            
+            col_cob1, col_cob2 = st.columns([1, 1.5])
+            with col_cob1:
+                fig_cobros = px.pie(df_cob_agrupado, values='monto', names='medio_pago', hole=0.5, 
+                                    color_discrete_sequence=px.colors.qualitative.Prism)
+                fig_cobros.update_traces(textposition='inside', textinfo='percent+label')
+                fig_cobros.update_layout(margin=dict(l=0, r=0, t=20, b=0), showlegend=False, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+                st.plotly_chart(fig_cobros, use_container_width=True)
+            with col_cob2:
+                st.markdown("<br><br>", unsafe_allow_html=True)
+                df_cob_agrupado['% del Total'] = (df_cob_agrupado['monto'] / df_cob_agrupado['monto'].sum() * 100).apply(lambda x: f"{x:.1f}%")
+                st.dataframe(df_cob_agrupado.style.format({"monto": "${:,.2f}"}), use_container_width=True, hide_index=True)
+
+        # --- RESTO DE GRÁFICOS ---
         st.markdown("<div class='pbi-title'>Rendimiento Mensual y Tendencias</div>", unsafe_allow_html=True)
         df_mes['facturacion_mensual'] = df_mes['salon'] + df_mes['mostrador']
         df_mes['ticket_prom_mes'] = df_mes['facturacion_mensual'] / df_mes['tickets'].replace(0, 1)
@@ -205,14 +267,6 @@ try:
                 st.markdown(f"**{idx+1}. {rubro}**")
                 df_filtrado = df_art[df_art['rubro'] == rubro].sort_values(by='ventas', ascending=False).head(10)
                 st.dataframe(df_filtrado[['producto', 'ventas']].style.format({"ventas": "${:,.0f}"}), use_container_width=True, hide_index=True)
-
-        st.markdown("<div class='pbi-title'>☠️ El 'Cementerio' de Stock (1 Unidad o menos vendida)</div>", unsafe_allow_html=True)
-        cementerio = df_art[df_art['unidades'] <= 1.0].sort_values(by='ventas', ascending=False)[['producto', 'rubro', 'ventas']]
-        st.dataframe(cementerio.head(15).style.format({"ventas": "${:,.2f}"}), use_container_width=True, hide_index=True)
-
-        st.markdown("<div class='pbi-title'>📋 Anexo: Catálogo 'Clase A' Completo</div>", unsafe_allow_html=True)
-        clase_a_completa = df_abc[df_abc['clase'] == 'A'][['producto', 'rubro', 'ventas']]
-        st.dataframe(clase_a_completa.style.format({"ventas": "${:,.2f}"}), use_container_width=True, hide_index=True, height=400)
 
 except Exception as e:
     st.error(f"Error interno procesando los datos. Asegúrese de cargar los archivos correctos. Detalle técnico: {e}")
